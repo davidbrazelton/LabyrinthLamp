@@ -150,6 +150,7 @@ const uint16_t XYTable[] = {
 #define COLOR_ORDER GRB
 #define LDR_PIN 36
 #define MAZE_SERIAL_OUTPUT 0
+#define MOTION_PIN 27
 
 Preferences preferences;
 
@@ -164,8 +165,17 @@ int SOLVEBRIGHTNESS_OFFSET = 0;
 CRGB WALLCOLOR = CRGB::White;
 int WALLBRIGHTNESS_OFFSET =0;
 
+//TaskHandle_t TaskHandle_generateMaze;
+//TaskHandle_t TaskHandle_save;
+
 hw_timer_t * timer = NULL;
 bool doSave = false;
+
+hw_timer_t * timerPause = NULL;
+bool doPauseMaze = false;
+bool doResumeMaze = false;
+int pauseSeconds = 0;
+int SECONDS_UNTIL_SLEEP = 300;
 
 #define MEM_MAX    20000
  
@@ -217,6 +227,42 @@ int sizex=8, sizey=20;     /* maze size */
 //int sizex=4, sizey=4;     /* maze size */
 int cellsize = 1; // larger the cellsize, easier the puzzle, in pixels
 int lwidth = 1; // maze wall width, in pixels
+
+// Checks if motion was detected, sets LED HIGH and starts a timer
+void IRAM_ATTR detectsMovement() {
+  Serial.println("MOTION DETECTED!!!");
+  doResumeMaze = true;
+}
+
+void IRAM_ATTR onTimerPause() {
+  pauseSeconds++;
+  if(pauseSeconds*10 > SECONDS_UNTIL_SLEEP) {
+    pauseSeconds = 0;
+    doPauseMaze = true;
+  }
+  
+}
+
+void PauseMaze() {
+  doPauseMaze = false;
+  Serial.println("Pause Maze");
+  timerAlarmDisable(timerPause);
+  //vTaskSuspend(TaskHandle_generateMaze);
+  //vTaskSuspend(TaskHandle_save);
+  //screen off
+  FastLED.setBrightness(0);
+  FastLED.show();
+}
+void ResumeMaze() {
+  doResumeMaze = false;
+  Serial.println("Resume Maze");
+  pauseSeconds = 0;
+  timerWrite(timerPause, 0); // reset countdown
+  timerAlarmEnable(timerPause); // enable (in case it was not)
+  //screen on
+  FastLED.setBrightness(BRIGHTNESS*17);
+  FastLED.show();
+}
 
 void IRAM_ATTR onTimer() {
   doSave = true;
@@ -896,6 +942,13 @@ void setup() {
   timerAttachInterrupt(timer, &onTimer, true);
   timerAlarmWrite(timer, 3000000, true);
 
+  // Configure the Prescaler at 80 the quarter of the ESP32 is cadence at 80Mhz
+  // 80000000 / 80 = 1000000 tics / seconde
+  timerPause = timerBegin(0, 80, true);  //tick every 1 second
+  timerAttachInterrupt(timerPause, &onTimerPause, true);
+  timerAlarmWrite(timerPause, 10000000, true); //10 seconds for test
+  timerAlarmEnable(timerPause);
+
   // Open Preferences with my-app namespace. Each application module, library, etc
   // has to use a namespace name to prevent key name collisions. We will open storage in
   // RW-mode (second parameter has to be false).
@@ -916,16 +969,13 @@ void setup() {
   
   //we must initialize rotary encoder
   rotaryEncoder.begin();
-
   rotaryEncoder.setup(
     [] { rotaryEncoder.readEncoder_ISR(); },
     [] { rotary_onButtonClick(); });
-
   //set boundaries and if values should cycle or not
   //in this example we will set possible values between 0 and 1000;
   bool circleValues = false;
   rotaryEncoder.setBoundaries(0, 15, circleValues); //minValue, maxValue, circleValues true|false (when max go to min and vice versa)
-
   /*Rotary acceleration introduced 25.2.2021.
    * in case range to select is huge, for example - select a value between 0 and 1000 and we want 785
    * without accelerateion you need long time to get to that number
@@ -934,8 +984,12 @@ void setup() {
    */
   rotaryEncoder.disableAcceleration(); //acceleration is now enabled by default - disable if you dont need it
   //rotaryEncoder.setAcceleration(250); //or set the value - larger number = more accelearation; 0 or 1 means disabled acceleration
-
   rotaryEncoder.setEncoderValue(BRIGHTNESS);
+
+  // PIR Motion Sensor mode INPUT_PULLUP
+  pinMode(MOTION_PIN, INPUT_PULLUP);
+  // Set motionSensor pin as interrupt, assign interrupt function and set RISING mode
+  attachInterrupt(digitalPinToInterrupt(MOTION_PIN), detectsMovement, RISING);
   
   xTaskCreate(
     generateMaze_task,  // Function that should be called
@@ -943,7 +997,7 @@ void setup() {
     50000,       // Stack size (bytes)
     NULL,       // Parameter to pass
     1,          // Task priority
-    NULL        // Task handle
+    NULL// Task handle
   );
   
   xTaskCreate(
@@ -952,7 +1006,7 @@ void setup() {
     1000,       // Stack size (bytes)
     NULL,       // Parameter to pass
     1,          // Task priority
-    NULL        // Task handle
+    NULL// Task handle
   );
 }
  
@@ -961,4 +1015,10 @@ void loop() {
 
   if(doSave)
     Save();
+
+  if(doPauseMaze)
+    PauseMaze();
+
+   if(doResumeMaze)
+    ResumeMaze();
 }
